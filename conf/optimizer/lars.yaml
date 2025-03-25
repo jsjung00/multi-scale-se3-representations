@@ -1,0 +1,7 @@
+name: "lars"
+weight_decay: 1.5e-6
+learning_rate_weights: 0.2
+learning_rate_biases: 0.0048
+
+# scheduler
+warmup_epochs: 10

@@ -1,0 +1,30 @@
+# Data and logging
+model_weights: "results/best_model_delta_t_0.01.pth"
+training_dir: "/mnt/jonathan/DataFlowMatching/small_training_data" #"/mnt/justin/training_data/" # #  "/mnt/justin/small_data/"  
+log_dir: "log/"
+
+# General parameters
+num_epochs: 1000
+batch_size: 256
+
+max_points: 150
+time_step: 5e-2
+load_model: False
+
+cont: False 
+model_checkpoint: null 
+test: False 
+hparams: null 
+
+# Losses 
+pair_loss: False
+recon_loss: True 
+sparse_loss: False
+sparsity_weight: 0.0
+recon_weight: 1.0
+barlow_weight: 0.0
+denoise_input: False
+
+
+# Barlow
+barlow_lambda: 1e-6

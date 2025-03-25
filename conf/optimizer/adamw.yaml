@@ -1,0 +1,6 @@
+name: "adamw"
+learning_rate: 5e-6
+weight_decay: 1e-5
+
+# scheduler
+warmup_epochs: 50

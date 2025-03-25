@@ -1,0 +1,26 @@
+defaults:
+  - _self_
+  - training: training.yaml
+  - model: egnn.yaml
+  - optimizer: adamw.yaml 
+
+accelerator: "gpu"
+devices: 1
+
+hydra:
+  sweeper:
+    params:
+      training.batch_size: 256
+      optimizer.learning_rate: 5e-4
+      model.encoder_depth: 3,4,5
+      model.encoder_init_feat_dim: 32,256
+      model.encoder_out_feat_dim: 256,1024
+      model.num_nearest_neighbors: 0
+      model.dropout: 0.01
+      model.soft_edges: false,true  
+
+      
+
+
+
+
