@@ -1,6 +1,6 @@
-# flow-good-rep-teachers
+# Multi-scale SE(3) Representations
 
-Learning better 3d point cloud representations using flow models and hierarchical representation learning.
+Learning hierarchical 3d point cloud representations.
 
 ### Relevant baselines to beat
 - [] Point-M2AE: Multi-scale Masked Autoencoders
