@@ -3,9 +3,12 @@ defaults:
   - training: training.yaml
   - model: egnn.yaml
   - optimizer: adamw.yaml 
+  - data: shapenet.yaml
 
 accelerator: "gpu"
 devices: 1
+
+
 
 hydra:
   sweeper:

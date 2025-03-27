@@ -6,13 +6,15 @@ from lightning.pytorch import Trainer
 from lightning.pytorch.loggers import MLFlowLogger
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
 from lightning.pytorch.callbacks import ModelCheckpoint 
-from utils import get_pointcloud_datasets, PaddedMatrixDataset, PairedDataset, LARS, get_max_num_nodes
+from utils import PaddedMatrixDataset, PairedDataset, LARS, get_max_num_nodes
+from data_code.data_utils import get_pointcloud_datasets, PointCloudScaleAndTranslate
 from torch.utils.data import DataLoader
 import hydra 
 from omegaconf import DictConfig, OmegaConf 
 import mlflow 
 import yaml
 from dotmap import DotMap
+from torchvision import transforms 
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
@@ -22,9 +24,13 @@ def main(cfg: DictConfig):
     # Dataset Paths
     training_dir = cfg.training.training_dir
     
-    # Initialize the Dataset
-    pc_train_dataset, pc_val_dataset, pc_test_dataset = get_pointcloud_datasets(directory=training_dir)
-    
+    # Initialize the Dataset and Add Augmentations
+    train_transforms = transforms.Compose([PointCloudScaleAndTranslate()])
+
+    pc_train_dataset, pc_val_dataset, pc_test_dataset = get_pointcloud_datasets(cfg.data)
+    breakpoint()
+
+
     # get max number of nodes 
     max_num_nodes = max(get_max_num_nodes(pc_train_dataset), get_max_num_nodes(pc_val_dataset), get_max_num_nodes(pc_test_dataset))
     
