@@ -1,4 +1,4 @@
-from sklearn.neighbors import radius_neighbors_graph
+from sklearn.neighbors import radius_neighbors_graph, kneighbors_graph
 import torch 
 import scipy.sparse as sp
 import numpy as np 
@@ -34,12 +34,12 @@ class SpectralPointCloud:
             assert self.eps_radius, "Must provide a radius to define neighbors"
             A = radius_neighbors_graph(self.point_cloud, self.eps_radius, include_self=False)
             assert A[0,0] == 0 and A[1,1] == 0
-            # TODO: ensure that diag is zero
-            #np.fill_diagonal(A, 0)
 
         else: 
             assert self.k, "Must provide number of neighbors to define neighbors"
-            raise ValueError("K Nearest Neighbors not implemented yet")
+            A = kneighbors_graph(self.point_cloud, self.k, include_self=False)
+            assert A[0,0] == 0 and A[1,1] == 0
+
         return A 
     
     def get_laplacian_decomposition(self):
@@ -65,15 +65,22 @@ class SpectralPointCloud:
         '''
         Applies a low pass graph filter on X using the pre-calaculated laplacian decomposition
             thresh: (int) Any eigenvalue index  (in ascending order) larger than thresh will become zero 
+
+        Returns: (nd.arr)
         '''
         if torch.is_tensor(X):
             X = X.detach().cpu().numpy()
 
         U, Lambda, U_T = self.laplacian_decomposition
 
+        assert len(Lambda.shape) == 2
+
         # Currently do a low pass based on the rank of the eigenvalue, zero out everything larger than thresh
+            # convert everything else to 1
         eigenvalues = np.diag(Lambda).copy()
+        eigenvalues[:thresh+1] = 1 # set all indices leq thresh to one
         eigenvalues[thresh+1:] = 0 # set all indices larger than thresh to zero 
+      
 
         low_pass_Lambda = np.diag(eigenvalues)    
 
@@ -82,7 +89,7 @@ class SpectralPointCloud:
     
     def get_lower_resolution_batch(self, len_batch, X, bandwidths=None, lower_band=0.005, upper_band=0.5):
         '''
-        Returns: (List[np.ndarr]) a list of len_batch many lower resolution versions of X. 
+        Returns: (ndarr[np.ndarr]) a list of len_batch many lower resolution versions of X. 
             If bandwidths not provided, samples uniformly from [lower_band, upper_band] 
         '''
         if bandwidths is None:
@@ -92,5 +99,7 @@ class SpectralPointCloud:
         for band in bandwidths:
             thresh_X = self.get_lower_resolution(band, X)
             thresh_Xs.append(thresh_X)
+
+        thresh_Xs = np.stack(thresh_Xs, axis=0)
         
         return thresh_Xs

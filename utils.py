@@ -274,26 +274,46 @@ def plot_3d_point_clouds(cloud1, cloud2=None, point_size=20):
         raise ValueError("Incorrect data given, either batch of point clouds or one point cloud")
 
 
-def get_ptcloud_img(ptcloud):
+def get_ptcloud_img(ptcloud, file_path="/mnt/justin/multi-scale-se3-representations/misc/point_cloud.png"):
     if torch.is_tensor(ptcloud):
         ptcloud = ptcloud.detach().cpu().numpy()
 
-    fig = plt.figure(figsize=(8, 8))
-    ax = fig.add_subplot(111, projection='3d')
-    ax.axis('off')
-    # ax.axis('scaled')
-    ax.view_init(30, 45)
+    if ptcloud.ndim == 2:
+        fig = plt.figure(figsize=(8, 8))
+        ax = fig.add_subplot(111, projection='3d')
+        ax.axis('off')
+        # ax.axis('scaled')
+        ax.view_init(30, 45)
 
-    max, min = np.max(ptcloud), np.min(ptcloud)
-    ax.set_xbound(min, max)
-    ax.set_ybound(min, max)
-    ax.set_zbound(min, max)
-    
-    
-    x, z, y = ptcloud.transpose(1, 0)
-    ax.scatter(x, y, z, zdir='z', c=x, cmap='jet')
+        max, min = np.max(ptcloud), np.min(ptcloud)
+        ax.set_xbound(min, max)
+        ax.set_ybound(min, max)
+        ax.set_zbound(min, max)
+        
+        x, z, y = ptcloud.transpose(1, 0)
+        ax.scatter(x, y, z, zdir='z', c=x, cmap='jet')
+    elif ptcloud.ndim == 3:
+        batch_size = ptcloud.shape[0]
+        fig = plt.figure(figsize=(8*batch_size, 8))
+        for i in range(batch_size):
+            ax = fig.add_subplot(1, batch_size, i+1, projection='3d')
+            ax.axis('off')
+            ax.view_init(30, 45)
+
+            single_point_cloud = ptcloud[i]
+            max, min = np.max(single_point_cloud), np.min(single_point_cloud)
+            ax.set_xbound(min, max)
+            ax.set_ybound(min, max)
+            ax.set_zbound(min, max)
+            
+            x, z, y = single_point_cloud.transpose(1, 0)
+            ax.scatter(x, y, z, zdir='z', c=x, cmap='jet')
+    else:
+        raise ValueError("Must give ptcloud either a batch of point clouds dim 3 or a single point cloud dim2")
+
 
     fig.canvas.draw()
+    fig.savefig(file_path, format="png")
     
     #TODO: get some object that I can return 
     
