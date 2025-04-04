@@ -1,4 +1,5 @@
 from .shapenet import ShapeNet
+from .ScanObjectNNDataset import ScanObjectNN
 from torch.utils.data import random_split 
 import numpy as np 
 import torch 
@@ -23,13 +24,28 @@ class PointCloudScaleAndTranslate(object):
             
         return pc
 
-def get_pointcloud_datasets(dataset_cfg, split_ratios=[0.8, 0.1,0.1]):
-    # Returns train, val, test datasets or train/test based on the given split_ratios 
+def get_pointcloud_datasets(dataset_cfg, val_ratio=None):
+    '''
+    Returns train, val (optional), test datasets
+
+    val_ratio: (float) Percentage of training data
+    '''
+    
     dataset_name = dataset_cfg.NAME 
     if dataset_name == 'ShapeNet':
-        full_dataset = ShapeNet(dataset_cfg)
+        train_dataset = ShapeNet(dataset_cfg, "train")
+        if val_ratio:
+            train_dataset, val_dataset = random_split(train_dataset, [1-val_ratio, val_ratio]) 
+        test_dataset = ShapeNet(dataset_cfg, "test")
+    elif dataset_name == "ScanObjectNN":
+        train_dataset = ScanObjectNN(dataset_cfg, "train")
+        if val_ratio:
+            train_dataset, val_dataset = random_split(train_dataset, [1-val_ratio, val_ratio]) 
+        test_dataset = ScanObjectNN(dataset_cfg, "test")
     else:
-        raise ValueError("Currently only loads ShapeNet. TODO: add in ModelNet40 and ScanObject")
+        raise ValueError("Currently only loads ShapeNet and ScanObject. TODO: add modelnet40")
 
-    split_datasets = random_split(full_dataset, split_ratios) 
-    return split_datasets
+    if val_ratio:
+        return train_dataset, val_dataset, test_dataset 
+    
+    return train_dataset, test_dataset

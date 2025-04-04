@@ -5,7 +5,8 @@ log_dir: "log/"
 
 # General parameters
 num_epochs: 1000
-batch_size: 256
+batch_size: 8
+
 
 max_points: 150
 time_step: 5e-2
@@ -32,6 +33,7 @@ denoise_input: False
 barlow_lambda: 1e-6
 
 # Consistency augmentation
-num_lowres_augmentations: 16
+num_lowres_augmentations: 32
 min_radius: 0.1
 max_radius: 0.75
+svm_batch_size: 256 # do the max RAM allows since not used for gradients + batches are to be accumulated... 

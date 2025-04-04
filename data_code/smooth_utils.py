@@ -11,48 +11,129 @@ import scipy.sparse as sp
 from scipy.spatial import cKDTree 
 import numpy as np 
 from collections import deque 
-from utils import plot_3d_point_clouds, get_ptcloud_img, get_pointcloud_datasets
+from utils import plot_3d_point_clouds, get_ptcloud_img, get_pointcloud_datasets, get_feat_mask
 import pyvista 
 import plotly.graph_objects as go
 import line_profiler
 import time 
+import concurrent.futures
+import psutil
+import pykeops
+from pykeops.torch import LazyTensor 
+
+
+def epanechnikov_torch(d, radius):
+    '''
+    d: (torch.Tensor)
+    radius: (float) bandwidth
+    '''
+    mu = d / radius 
+
+    breakpoint()
+    
+    mask = (mu.abs() <= 1).if_then_else(1.0, 0.0)
+
+    return (3.0/4.0) * (1 - mu**2) * mask
 
 
 def epanechnikov_weight(distances, radius):
     weights = 1 - (distances/radius) ** 2
     weights[distances > radius] = 0
-    return weights
+    return 3.0/4.0 * weights
 
 def uniform_weights(distances, radius):
     weights = np.ones_like(distances)
     weights[distances > radius] = 0
     return weights 
 
-def create_lowres_structure_features(point_cloud, feature_matrix, radius_list):
+def convolve_torch(point_cloud, radius, kernel="epanechnikov"):
+    '''
+    Returns kernel convolved point cloud and also normalized weight matrix used for convolution
+
+    point_cloud: (torch.Tensor) (N,3)
+    radius: (float)
+
+    #TODO: fix and write efficient implementation
+    '''
+    points_i = LazyTensor(point_cloud[:, None, :]) 
+    points_j = LazyTensor(point_cloud[None, :, :])
+
+    D2 = ((points_i - points_j) ** 2).sum(-1).sqrt()
+
+    weights = epanechnikov_torch(D2, radius)
+    normalization = weights.sum(dim=1, keepdim=True) + 1e-8
+    weights = weights / normalization
+
+    conv_point_cloud = weights @ point_cloud 
+
+    return conv_point_cloud, weights 
+
+
+
+def process_radius(radius, point_cloud, feature_matrix, orig_mask, is_tens):
+    '''
+    Helper function used in create_lowres_input to allow for parallel processing
+    '''
+    # downsample point cloud 
+    smooth_cloud, indices_weights = convolve_point_cloud(point_cloud, radius=radius)
+
+    # downsample feature matrix 
+    smooth_features = recreate_convolution(feature_matrix, indices_weights)
+
+    if is_tens:
+        smooth_cloud = torch.from_numpy(smooth_cloud).float()
+        smooth_features = torch.from_numpy(smooth_features).float()
+
+    # get feats, mask
+    feat, mask = get_feat_mask(smooth_cloud, orig_mask)
+    return feat, smooth_cloud, mask, smooth_features 
+
+
+def create_lowres_input(point_cloud, feature_matrix, orig_mask, radius_list):
     '''
     Given original point_cloud and feature matrix, creates downsampled versions of the point cloud and feature matrix
         according to various radii in the radius_list
 
+    point_cloud: (tensor or nd.array) shape (1,N,3) or (N,3)
+    feature_matrix: (tensor or nd.array) shape (1,N,d) or (N,d)
+
     Returns: 
-        List of [(lowres_point_cloud, lowres_feature_matrix)] of original data format
+        Tuple of (feats, coors, masks, feature_matrices) where feats is (B,N,1) and coors is (B,N,3) and mask is (B,N) and 
+            feature_matrices is (B,N,d)
     '''
     is_tens = torch.is_tensor(point_cloud)
 
     if is_tens:
         point_cloud = point_cloud.detach().cpu().numpy()
         feature_matrix = feature_matrix.detach().cpu().numpy()
+    assert feature_matrix.shape[-1] > 1, "Feature matrix must have a dimension that is larger than 1.... else change squeeze code"
 
-    point_cloud_features_pairs = []
+    point_cloud = np.squeeze(point_cloud)
+    feature_matrix = np.squeeze(feature_matrix)
+
+    feats, coors, masks, feature_matrices = [], [], [], []
+
     for radius in radius_list:
-        # downsample point cloud 
-        smooth_cloud, indices_weights = convolve_point_cloud(point_cloud, radius=radius)
+        feat, smooth_cloud, mask, smooth_features = process_radius(radius, point_cloud, feature_matrix, orig_mask, is_tens)
+        feats.append(feat)
+        coors.append(smooth_cloud)
+        masks.append(mask)
+        feature_matrices.append(smooth_features)
 
-        # downsample feature matrix 
-        smooth_features = recreate_convolution(feature_matrix, indices_weights)
+    '''
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        tasks = [executor.submit(process_radius, radius, point_cloud, feature_matrix, orig_mask, is_tens) for radius in radius_list]
+        for future in concurrent.futures.as_completed(tasks):
+            feat, smooth_cloud, mask, smooth_features = future.result()
+            feats.append(feat)
+            coors.append(smooth_cloud)
+            masks.append(mask)
+            feature_matrices.append(smooth_features)
+    '''
+    # torch stack
+    feats, coors, masks, feature_matrices = torch.stack(feats), torch.stack(coors), torch.stack(masks), torch.stack(feature_matrices)
     
-        point_cloud_features_pairs.append((smooth_cloud, smooth_features))
-    
-    return point_cloud_features_pairs
+    return feats, coors, masks, feature_matrices
 
 
 
@@ -127,6 +208,53 @@ def convolve_point_cloud(point_cloud, radius, kernel='epanechnikov'):
     return smoothed_points, list_nbor_indices_weights
 
 
+@line_profiler.profile 
+def convolve_point_cloud_vectorized(point_cloud, radius, kernel='epanechnikov'):
+    """
+    Vectorized convolution of a point cloud using pairwise distances.
+    
+    Parameters:
+      point_cloud: np.array of shape (N, 3)
+      radius: float, the radius to consider neighbors
+      kernel: str, either 'epanechnikov' or 'uniform'
+    
+    Returns:
+      smoothed_points: np.array of shape (N, 3)
+      list_nbor_indices_weights: list of tuples (indices, weights) for each point
+    """
+    N = point_cloud.shape[0]
+    
+    # Compute pairwise differences and distances: shape (N, N, 3) then (N, N)
+    diff = point_cloud[None, :] - point_cloud[:, None]
+    dists = np.linalg.norm(diff, axis=2)
+    
+    # Create a boolean mask for neighbors within the radius
+    mask = dists <= radius
+    
+    # Compute weights vectorized based on kernel type
+    if kernel == 'epanechnikov':
+        weights = np.clip(1 - (dists / radius) ** 2, 0, None) * mask
+    elif kernel == 'uniform':
+        weights = mask.astype(np.float64)
+    else:
+        raise ValueError("Unknown kernel type")
+    
+    # Sum weights for each point (avoid division by zero)
+    sum_weights = weights.sum(axis=1, keepdims=True)
+    sum_weights[sum_weights == 0] = 1
+    
+    # Compute weighted average of neighbors for each point
+    smoothed_points = (weights[:, :, None] * point_cloud[None, :]).sum(axis=1) / sum_weights
+    
+    # Optional: extract neighbor indices and weights for each point.
+    # This still requires a Python loop, but only for gathering results, not for heavy computation.
+    list_nbor_indices_weights = []
+    for i in range(N):
+        indices = np.nonzero(mask[i])[0].tolist()
+        list_nbor_indices_weights.append((indices, weights[i, mask[i]]))
+    
+    return smoothed_points, list_nbor_indices_weights
+
 
 
 def create_fractal_point_cloud(num_layers=3):
@@ -134,6 +262,8 @@ def create_fractal_point_cloud(num_layers=3):
     Create a fractal point cloud of various cube structures 
 
     num_layers: number of cube resolutions. num_layers==1 means just a single cube
+
+    Return: (nd.array) (N,3)
     '''
     mult_factor = 0.25
     start_length = 1
@@ -225,6 +355,36 @@ if __name__ == "__main__":
     
     test_point_cloud =  create_fractal_point_cloud(num_layers=3)
 
+    convolved_one = convolve_torch(torch.from_numpy(test_point_cloud).float(), radius=0.5)
+    convolved_two = convolve_point_cloud(test_point_cloud, radius=0.5)
+
+    checking_convolution = torch.is_equal(convolved_one, torch.from_numpy(convolved_two).float())
+    breakpoint()
+    
+    
+
+
+
+    # confirm that the two functions are identical 
+    start_time = time.perf_counter()
+    convolved_one = convolve_point_cloud(test_point_cloud, radius=0.5)[0]
+    end_time = time.perf_counter()
+    print(f"Time elapses: {end_time-start_time :.4f} sec" )
+
+    start_time = time.perf_counter()
+    convolved_two = convolve_point_cloud_vectorized(test_point_cloud, radius=0.5)[0]
+    end_time = time.perf_counter()
+    print(f"Time elapses: {end_time-start_time :.4f} sec" )
+
+    breakpoint()
+
+    is_equal = np.all(np.equal(convolved_one, convolved_two))
+
+
+
+
+    #create_lowres_input(torch.from_numpy(test_point_cloud).float(), torch.rand(len(test_point_cloud),100), torch.ones(len(test_point_cloud)), np.random.uniform(size=32))
+
     #vista_visualize(test_point_cloud)
 
     # visualize the original point cloud 
@@ -237,7 +397,9 @@ if __name__ == "__main__":
 
     
     # run some time analysis
+    '''
     start_time = time.perf_counter()
+    #smooth_cloud, indices_weights = convolve_point_cloud_vectorized(test_point_cloud, radius=0.5)
     smooth_cloud, indices_weights = convolve_point_cloud(test_point_cloud, radius=0.5)
     end_time = time.perf_counter()
     print(f"Time elapses: {end_time-start_time :.4f} sec" )
@@ -249,6 +411,7 @@ if __name__ == "__main__":
 
     is_equal = np.all(np.equal(smooth_cloud, recreate_smooth_cloud))
     print(f"Is the recreation possible: {is_equal}")
+    '''
     
     #get_ptcloud_img(test_point_cloud)
     #print(test_point_cloud)

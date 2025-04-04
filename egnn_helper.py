@@ -31,3 +31,10 @@ def batched_index_select(values, indices, dim = 1):
 
     dim += value_expand_len
     return values.gather(dim, indices)
+
+def huber_reconstruction_loss(coors, coors_hat):
+    orig_pair_distance_matrices = torch.cdist(coors, coors)
+    pred_pair_distance_matrices = torch.cdist(coors_hat, coors_hat)
+    huber_loss = nn.HuberLoss()
+
+    return huber_loss(orig_pair_distance_matrices, pred_pair_distance_matrices)

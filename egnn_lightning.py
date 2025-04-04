@@ -6,22 +6,26 @@ import lightning as L
 import torch
 from torch import nn, einsum, broadcast_tensors
 import torch.nn.functional as F
+import numpy as np 
+from sklearn.svm import SVC
 
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
-from egnn_helper import exists, safe_div, batched_index_select
+from egnn_helper import exists, safe_div, batched_index_select, huber_reconstruction_loss
 from egnn_pytorch import EGNN_Network
 from egnn import Swish_, EGNN, PointNetDecoder
-from utils import off_diagonal, LARS
+from utils import off_diagonal, LARS, get_feat_mask
 from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 import math 
-from data_code.smooth_utils import create_lowres_structure_features
+from data_code.smooth_utils import create_lowres_input
+import time 
+
 
 SiLU = nn.SiLU if hasattr(nn, "SiLU") else Swish_
 
 
 
-class LitEGNNConsistent(pl.LightningModule):
+class LitEGNNConsistent(L.LightningModule):
     '''
     Applies reconstruction and consistency loss. May need to refactor to apply to other, non EGNN models.
     TODO: handle the case where we need to mask input. Current convolution does NOT handle masking
@@ -109,8 +113,6 @@ class LitEGNNConsistent(pl.LightningModule):
         x_hat = self.decoder(decode_input)
         return x_hat 
 
-
-
     def forward(self, feats, coors, adj_mat=None, edges=None, mask=None):
         '''
         Takes in feature vectors, coordinate vectors and passes to encoder with EGNN's 
@@ -130,14 +132,11 @@ class LitEGNNConsistent(pl.LightningModule):
                 encoded_feats. Features of all nodes
         '''
         assert mask is not None, "Since we use padding we need mask"
-        if mask_prime is None:
-            mask_prime = mask 
+       
         N = feats.shape[1]
 
         # apply MLP to transform data feature dimension to expected input feature dim if need be
         feats = self.init_feat_embedder(feats) #transform to (B,N,encoder_init_feat_dim)
-        if feats_prime is not None:
-            feats_prime = self.init_feat_embedder(feats_prime)
 
         assert self.recon_loss, "If no pair loss there is no other loss currently"
 
@@ -154,79 +153,107 @@ class LitEGNNConsistent(pl.LightningModule):
         return_dict = {'z': z, 'x_hat': x_hat, 'encoded_feats': encoded_feats}
         return return_dict
 
-    def shared_step(self, batch, batch_idx, training=True, test=False, log_scale=True):
-        # calculates reconstruction and consistency loss (consistency loss only for training)
+    def get_svm_feat_labels(self, batch, is_test=False):
+        '''
+        Returns a list of features (representations from our base model) for SVM to train on and a list of target labels
+        '''
+        self.eval() 
+        feats, coors, mask, label = batch  
+        labels = list(map(lambda x: x[0], label.numpy().tolist()))
+        coors = coors.cuda().contiguous()
+        feats = feats.cuda().contiguous()
+        mask = mask.cuda().contiguous()
 
-        if not training: 
+        with torch.no_grad():
+            return_dict = self(feats, coors, mask=mask) 
+            features = return_dict['encoded_feats']
+
+        features = features.detach().cpu().numpy()
+
+        if is_test:
+            return {'test_features': features, 'test_labels': labels}
+        
+        return {'features': features, 'labels': labels}
+
+    def shared_step(self, batch, batch_idx, training=True, test=False, log_scale=True):
+        '''
+        Calculate reconstruction loss and consistency loss.
+
+        batch: tuple of (feats, coors, masks)
+        '''
+        if not training or test: 
             self.eval()
 
-        loss, consistency_loss, reconstruction_loss = 0., 0., 0. 
+        loss, tot_consistency_loss, tot_reconstruction_loss = 0., 0., 0. 
         loss_log_dict = {}
     
         feats, coors, masks = batch
+        
+        all_feats = []
+        all_coors = [] 
+        all_masks = []
+        all_feature_matrices = []
 
-        if training:
-            if self.training_config.consistency_loss:
-                # first calculate z_1
-                batch_size = feats.shape[0]
-                for elm_index in range(batch_size):
-                    feat, coor, mask = feats[elm_index], coors[elm_index], masks[elm_index]  
-                    output_dict = self(feats=feats, coors=coors, mask=mask)
-                    # optional: add reconstruction loss for the original structure 
+        # first calculate z_1 and collect augmented feats, coors, mask, feature_matrices from each point cloud 
+        batch_size = feats.shape[0]
+        for elm_index in range(batch_size):
+            feat_orig, coor_orig, mask_orig = feats[elm_index], coors[elm_index], masks[elm_index]
+            feat_orig, coor_orig, mask_orig = feat_orig.unsqueeze(0), coor_orig.unsqueeze(0), mask_orig.unsqueeze(0)
 
-                    orig_point_cloud = coor 
-                    orig_feature_matrix = output_dict['encoded_feats']
-                    
-                    # create various low resolution versions of point cloud and corresponding feature embeddings
-                    radius_list = np.random.uniform(low=self.training_config.min_radius, high=self.training_config.max_radius,\
-                        size=self.training_config.num_lowres_augmentations)
-
-                    structure_features_pairs = create_lowres_structure_features(orig_point_cloud,orig_feature_matrix,radius_list)
-                    
-                    # calculate enc(x_t) 
-                    for pair_idx in range(len(structure_features_pairs)):
-                        x_t, z_t = structure_features_pairs[pair_idx]
-                        
-                        # refactor into a different function
-                        feat = torch.norm(x_t, dim=-1)
-                        mask = torch.ones(x_t.shape[0])
-                        
-                        output_dict = self(feats=feat, coors=x_t, mask=mask)
-
-                        z_t_hat = output_dict['encoded_feats']
-
-                        # consistency loss 
-                        mse_loss = torch.nn.MSE()
-                        consistency_loss += mse_loss(z_t_hat, z_t)
-
-                        # reconstruction loss
-                        if self.training_config.recon_loss:
-                            x_hat = output_dict['x_hat']
-                            # reconstruction loss should be huber loss on pairwise distance matrix 
-                            
-                            orig_pair_distance_matrices = torch.cdist(coors, coors)
-                            pred_pair_distance_matrices = torch.cdist(x_hat, x_hat)
-
-                            huber_loss = nn.HuberLoss()
-
-                            reconstruction_loss += huber_loss(orig_pair_distance_matrices, pred_pair_distance_matrices)
-
-                loss += (self.training_config.recon_weight * recon_loss)
-                loss += (self.training_config.consistency_weight * consistency_loss)
-
-                loss_log_dict['recon_loss'] = recon_loss
+            output_dict_orig = self(feats=feat_orig, coors=coor_orig, mask=mask_orig)
+            orig_feature_matrix = output_dict_orig['encoded_feats']
+            # add reconstruction loss for the original structure
+            if self.training_config.recon_loss:
+                orig_x_hat = output_dict_orig['x_hat']
+                orig_recon_loss = huber_reconstruction_loss(coor_orig, orig_x_hat)
+                tot_reconstruction_loss += orig_recon_loss
             
-            else:
-                raise ValueError("Consistency loss is off.")
+            
+            # create various low resolution versions of point cloud and corresponding feature embeddings
+            radius_list = np.random.uniform(low=self.training_config.min_radius, high=self.training_config.max_radius,\
+                size=self.training_config.num_lowres_augmentations)
+            
+            ## TODO: need to optimize this
+            
+            start_time = time.perf_counter() 
+            aug_feats, aug_coors, aug_masks, aug_feature_matrices = create_lowres_input(coor_orig, orig_feature_matrix, mask_orig, radius_list)
+            end_time = time.perf_counter()
 
+            print(f"Elapsed time: {end_time - start_time}")
 
-        
-        
+            all_feats.append(aug_feats)
+            all_coors.append(aug_coors)
+            all_masks.append(aug_masks)
+            all_feature_matrices.append(aug_feature_matrices)
 
-        # TODO: add SVM classification evaluation 
+        # convert to batch input and run inference
+        all_feats = torch.cat(all_feats, 0)
+        all_coors = torch.cat(all_coors, 0)
+        all_masks = torch.cat(all_masks, 0)
+        all_feature_matrices = torch.cat(all_feature_matrices, 0)
+ 
+        output_dict = self(feats=all_feats, coors=all_coors, mask=all_masks)
+
+        # consistency loss 
+        if self.training_config.consistency_loss:
+            z_t_hats = output_dict['encoded_feats']
+            mse_loss = torch.nn.MSELoss()
+            consistency_loss = mse_loss(z_t_hats, all_feature_matrices)
+            tot_consistency_loss += consistency_loss
+            loss += (self.training_config.consistency_weight * consistency_loss)
+            loss_log_dict['consistency_loss'] = tot_consistency_loss
+
+        # reconstruction loss
+        if self.training_config.recon_loss:
+            x_hat = output_dict['x_hat']
+            # reconstruction loss should be huber loss on pairwise distance matrix 
+            recon_loss = huber_reconstruction_loss(x_hat, all_coors)
+            tot_reconstruction_loss += recon_loss
+            loss += (self.training_config.recon_weight * tot_reconstruction_loss)
+            
+            loss_log_dict['recon_loss'] = tot_reconstruction_loss
 
         loss_log_dict['loss'] = loss
-
 
         # label formatting
         return_log_dict = {}
@@ -251,20 +278,66 @@ class LitEGNNConsistent(pl.LightningModule):
 
         return loss, return_log_dict  
 
-    def training_step(self, batch, batch_idx):
-        loss, log_dict = self.shared_step(batch, batch_idx, True)
-        self.log_dict(log_dict)
-        return loss 
+    def on_train_epoch_end(self, training_outputs):
+        breakpoint()
+        all_train_features = np.concatenate([output["features"] for output in training_outputs], axis=0)
+        all_train_features = all_train_features.reshape(-1, all_train_features.shape[-1]) #(N,d)
+        all_train_labels, all_test_labels = [], []
+        for output in training_outputs:
+            all_train_labels += output["labels"]
+            all_test_labels += output["test_labels"]
+        
+        all_test_features = np.concatenate([output["test_features"] for output in training_outputs], axis=0)
+        all_test_features = all_test_features.reshape(-1, all_test_features.shape[-1]) 
+        
+        model_tl = SVC(C = 0.01, kernel='linear')
+        model_tl.fit(all_train_features, all_train_labels)
+
+        test_accuracy = model_tl.score(all_test_features, all_test_labels)
+        print(f"Linear accuracy: {test_accuracy}")
+        
+        self.log("svm_test_accuracy", test_accuracy)
+         
+
+    def training_step(self, batch, batch_idx, dataloader_idx=0):
+        breakpoint()
+        if dataloader_idx == 0:
+             # batch should be feats, coors, masks (but a small number, since we are going to augment the batch)
+            loss, log_dict = self.shared_step(batch, batch_idx, training=True)
+            self.log_dict(log_dict) 
+            return {'loss': loss} 
+        elif dataloader_idx == 1:
+            svm_train_dict = self.get_svm_feat_labels(batch)
+            return svm_train_dict
+        elif dataloader_idx == 2:
+            svm_test_dict = self.get_svm_feat_labels(batch, True)
+            return svm_test_dict
+        else:
+            raise ValueError("Should only have train_ds, svm_train, svm_test")
     
     def validation_step(self, batch, batch_idx):
-        loss, log_dict = self.shared_step(batch, batch_idx, False)
-        self.log_dict(log_dict)
-        return loss  
+        # batch should be feats, coors, masks (but a small number, since we are going to augment the batch)
+        loss, log_dict = self.shared_step(batch, batch_idx, training=False)
+        self.log_dict(log_dict) 
+        return {'loss': loss} 
+       
     
-    def test_step(self, batch, batch_idx):
-        loss, log_dict = self.shared_step(batch, batch_idx, training=False, test=True)
-        self.log_dict(log_dict)
-        return loss 
+    def test_step(self, batch, batch_idx, dataloader_idx=0):
+        breakpoint()
+        # TODO: check if test takes in a seperate SVM test set 
+        if dataloader_idx == 0:
+             # batch should be feats, coors, masks (but a small number, since we are going to augment the batch)
+            loss, log_dict = self.shared_step(batch, batch_idx, training=False, test=True)
+            self.log_dict(log_dict) 
+            return {'loss': loss} 
+        elif dataloader_idx == 1:
+            svm_train_dict = get_svm_feat_labels(batch)
+            return svm_train_dict
+        elif dataloader_idx == 2:
+            svm_test_dict = get_svm_feat_labels(batch, True)
+            return svm_test_dict
+        else:
+            raise ValueError("Should only have train_ds, svm_train, svm_test")
     
     def configure_optimizers(self):
         # Setup LARS optimizer if pair loss
@@ -505,6 +578,7 @@ class LitEGNNPointNet(L.LightningModule):
 
         loss = 0. 
         loss_log_dict = {}
+        breakpoint()
         if self.training_config.pair_loss:
             feats, feats_prime, coors, coors_prime, mask = batch
             output_dict = self(feats=feats, coors=coors,mask=mask,\

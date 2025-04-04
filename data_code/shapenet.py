@@ -5,10 +5,10 @@ import numpy as np
 from .io import IO 
 
 class ShapeNet(data.Dataset):
-    def __init__(self, config):
+    def __init__(self, config, subset):
         self.data_root = config.DATA_PATH
         self.pc_path = config.PC_PATH
-        self.subset = config.subset
+        self.subset = subset
         self.npoints = config.N_POINTS
         
         self.data_list_file = os.path.join(self.data_root, f'{self.subset}.txt')

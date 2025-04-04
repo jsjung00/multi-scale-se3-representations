@@ -135,6 +135,39 @@ class PairedDataset(torch.utils.data.Dataset):
         return feats, feats_prime, coors, coors_prime, mask   
 
 
+class PointToGraphDataset(torch.utils.data.Dataset):
+    '''
+    Retursn a dataset that is used for EGNN. Specifically handles point cloud dataset such as Shapenet and ScanObjectNN.
+        Assumes that each point cloud has same number of points
+
+    contains_label: (bool)If true, then the dataset has as third object tuple (pc, label). If false, dataset has as third object pc 
+    '''
+    def __init__(self, ds, contains_label):
+        self.ds = ds 
+        self.contains_label = contains_label
+        #num_nodes = [len(self.ds[i]) for i in range(0, len(self.ds))]
+        #assert len(set(num_nodes)) == 1
+    
+    def __len__(self):
+        return len(self.ds)
+    
+    def __getitem__(self, idx):
+        # if contains_label, return (feats, coors, mask, label)
+        # else return (feats, coors, mask)
+
+        if self.contains_label: 
+            coords, label = self.ds[idx][2]
+        else:
+            coords = self.ds[idx][2]
+
+        mask = torch.ones(len(coords), dtype=torch.int).bool()
+        feats = torch.norm(coords, dim=-1, keepdim=True)
+
+        if self.contains_label:
+            return feats, coords, mask, label 
+
+        return feats, coords, mask    
+
 class PaddedMatrixDataset(torch.utils.data.Dataset):
     '''
     Returns a dataset that is used for EGNN. 
@@ -164,7 +197,7 @@ class PaddedMatrixDataset(torch.utils.data.Dataset):
         return len(self.ds)
 
     def __getitem__(self, idx):
-        # return (feat, coors, mask) where feat is identical to coords 
+        # return (feat, coors, mask) where feat is norm of coords
         
         # pad coords
         coords = self.ds[idx] #(N,3)
@@ -321,6 +354,20 @@ def get_ptcloud_img(ptcloud, file_path="/mnt/justin/multi-scale-se3-representati
     #img = np.frombuffer(renderer.tostring_rgb(), dtype=np.uint8)
     #img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
     #return img
+
+def get_feat_mask(point_cloud, orig_mask):
+    '''
+    For a point cloud, returns features vector and mask 
+    '''
+    # TODO: change it so it doesn't just return ones vector  
+    mask = torch.ones(len(point_cloud), dtype=torch.int)
+    mask = mask.bool()
+
+    # define features as the norm of each point
+    feat = torch.norm(point_cloud, dim=-1, keepdim=True)
+    return feat, mask 
+    
+
 
 if __name__ == "__main__":
     print("Hello world")
