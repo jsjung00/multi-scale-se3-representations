@@ -4,6 +4,7 @@ https://github.com/lucidrains/egnn-pytorch
 '''
 import lightning as L 
 import torch
+from torch.profiler import profile, record_function, ProfilerActivity 
 from torch import nn, einsum, broadcast_tensors
 import torch.nn.functional as F
 import numpy as np 
@@ -17,7 +18,7 @@ from egnn import Swish_, EGNN, PointNetDecoder
 from utils import off_diagonal, LARS, get_feat_mask
 from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 import math 
-from data_code.smooth_utils import create_lowres_input
+from data_code.smooth_utils import fast_batch_lowres
 import time 
 
 
@@ -31,8 +32,13 @@ class LitEGNNConsistent(L.LightningModule):
     TODO: handle the case where we need to mask input. Current convolution does NOT handle masking
 
     '''
-    def __init__(self, cfg):
+    def __init__(self, cfg, profiler=None):
         super().__init__()
+        self.profiler = profiler 
+
+        self.training_svm_outputs = [] # list of dictionaries containing svm training features
+        self.test_svm_outputs = [] # list of ditionaries containing svm test features
+
         self.training_config = cfg.training
         self.model_config = cfg.model 
         self.optimizer_config = cfg.optimizer
@@ -156,6 +162,9 @@ class LitEGNNConsistent(L.LightningModule):
     def get_svm_feat_labels(self, batch, is_test=False):
         '''
         Returns a list of features (representations from our base model) for SVM to train on and a list of target labels
+
+        {'features': numpy.array (B,N,d), 'labels': List[np.float]} or {'test_features': numpy.array (B,N,d), 'test_labels': List[np.float]}
+
         '''
         self.eval() 
         feats, coors, mask, label = batch  
@@ -181,114 +190,111 @@ class LitEGNNConsistent(L.LightningModule):
 
         batch: tuple of (feats, coors, masks)
         '''
-        if not training or test: 
-            self.eval()
+        with self.profiler.profile("shared_step"):
+            if not training or test: 
+                self.eval()
 
-        loss, tot_consistency_loss, tot_reconstruction_loss = 0., 0., 0. 
-        loss_log_dict = {}
-    
-        feats, coors, masks = batch
+            loss, tot_consistency_loss, tot_reconstruction_loss = 0., 0., 0. 
+            loss_log_dict = {}
         
-        all_feats = []
-        all_coors = [] 
-        all_masks = []
-        all_feature_matrices = []
-
-        # first calculate z_1 and collect augmented feats, coors, mask, feature_matrices from each point cloud 
-        batch_size = feats.shape[0]
-        for elm_index in range(batch_size):
-            feat_orig, coor_orig, mask_orig = feats[elm_index], coors[elm_index], masks[elm_index]
-            feat_orig, coor_orig, mask_orig = feat_orig.unsqueeze(0), coor_orig.unsqueeze(0), mask_orig.unsqueeze(0)
-
-            output_dict_orig = self(feats=feat_orig, coors=coor_orig, mask=mask_orig)
-            orig_feature_matrix = output_dict_orig['encoded_feats']
-            # add reconstruction loss for the original structure
-            if self.training_config.recon_loss:
-                orig_x_hat = output_dict_orig['x_hat']
-                orig_recon_loss = huber_reconstruction_loss(coor_orig, orig_x_hat)
-                tot_reconstruction_loss += orig_recon_loss
+            feats, coors, masks = batch
             
-            
-            # create various low resolution versions of point cloud and corresponding feature embeddings
-            radius_list = np.random.uniform(low=self.training_config.min_radius, high=self.training_config.max_radius,\
+            init_point_clouds = []
+            init_feature_matrices = []
+
+            # first calculate z_1
+            batch_size = feats.shape[0]
+            with self.profiler.profile("get_init_pc"):
+                for elm_index in range(batch_size):
+                    feat_orig, coor_orig, mask_orig = feats[elm_index], coors[elm_index], masks[elm_index]
+                    feat_orig, coor_orig, mask_orig = feat_orig.unsqueeze(0), coor_orig.unsqueeze(0), mask_orig.unsqueeze(0)
+
+                    output_dict_orig = self(feats=feat_orig, coors=coor_orig, mask=mask_orig)
+                    orig_feature_matrix = output_dict_orig['encoded_feats']
+                    
+                    init_point_clouds.append(coor_orig)
+                    init_feature_matrices.append(orig_feature_matrix)
+                    
+                    # add reconstruction loss for the original structure
+                    if self.training_config.recon_loss:
+                        orig_x_hat = output_dict_orig['x_hat']
+                        orig_recon_loss = huber_reconstruction_loss(coor_orig, orig_x_hat)
+                        tot_reconstruction_loss += orig_recon_loss
+
+            init_point_clouds = torch.cat(init_point_clouds, dim=0)
+            init_feature_matrices = torch.cat(init_feature_matrices, dim=0)
+
+            # calculate low resolution versions based on various radius
+            with self.profiler.profile("get_aug_batch"):
+                radii = np.random.uniform(low=self.training_config.min_radius, high=self.training_config.max_radius,\
                 size=self.training_config.num_lowres_augmentations)
-            
-            ## TODO: need to optimize this
-            
-            start_time = time.perf_counter() 
-            aug_feats, aug_coors, aug_masks, aug_feature_matrices = create_lowres_input(coor_orig, orig_feature_matrix, mask_orig, radius_list)
-            end_time = time.perf_counter()
 
-            print(f"Elapsed time: {end_time - start_time}")
+                batch_feats, batch_point_clouds, batch_mask, batch_features = fast_batch_lowres(init_point_clouds, init_feature_matrices, radii) 
 
-            all_feats.append(aug_feats)
-            all_coors.append(aug_coors)
-            all_masks.append(aug_masks)
-            all_feature_matrices.append(aug_feature_matrices)
+                output_dict = self(feats=batch_feats, coors=batch_point_clouds, mask=batch_mask)
 
-        # convert to batch input and run inference
-        all_feats = torch.cat(all_feats, 0)
-        all_coors = torch.cat(all_coors, 0)
-        all_masks = torch.cat(all_masks, 0)
-        all_feature_matrices = torch.cat(all_feature_matrices, 0)
- 
-        output_dict = self(feats=all_feats, coors=all_coors, mask=all_masks)
+            # consistency loss 
+            with self.profiler.profile("consistency_loss"):
+                if self.training_config.consistency_loss:
+                    z_t_hats = output_dict['encoded_feats']
+                    mse_loss = torch.nn.MSELoss()
+                    consistency_loss = mse_loss(z_t_hats, batch_features)
+                    tot_consistency_loss += consistency_loss
+                    loss += (self.training_config.consistency_weight * consistency_loss)
+                    loss_log_dict['consistency_loss'] = tot_consistency_loss
 
-        # consistency loss 
-        if self.training_config.consistency_loss:
-            z_t_hats = output_dict['encoded_feats']
-            mse_loss = torch.nn.MSELoss()
-            consistency_loss = mse_loss(z_t_hats, all_feature_matrices)
-            tot_consistency_loss += consistency_loss
-            loss += (self.training_config.consistency_weight * consistency_loss)
-            loss_log_dict['consistency_loss'] = tot_consistency_loss
+            # reconstruction loss
+            with self.profiler.profile("recon_loss"):
+                if self.training_config.recon_loss:
+                    x_hat = output_dict['x_hat']
+                    # reconstruction loss should be huber loss on pairwise distance matrix 
+                    recon_loss = huber_reconstruction_loss(batch_point_clouds, x_hat)
+                    tot_reconstruction_loss += recon_loss
+                    loss += (self.training_config.recon_weight * tot_reconstruction_loss)
+                    
+                    loss_log_dict['recon_loss'] = tot_reconstruction_loss
 
-        # reconstruction loss
-        if self.training_config.recon_loss:
-            x_hat = output_dict['x_hat']
-            # reconstruction loss should be huber loss on pairwise distance matrix 
-            recon_loss = huber_reconstruction_loss(x_hat, all_coors)
-            tot_reconstruction_loss += recon_loss
-            loss += (self.training_config.recon_weight * tot_reconstruction_loss)
-            
-            loss_log_dict['recon_loss'] = tot_reconstruction_loss
+            loss_log_dict['loss'] = loss
 
-        loss_log_dict['loss'] = loss
+            # label formatting
+            return_log_dict = {}
+            if training:
+                for key, value in loss_log_dict.items():
+                    if log_scale:
+                        return_log_dict[f'log_train_{key}'] = math.log(value) 
+                    else:
+                        return_log_dict[f'train_{key}'] = value
+            elif test:
+                for key, value in loss_log_dict.items():
+                    if log_scale:
+                        return_log_dict[f'log_test_{key}'] = math.log(value) 
+                    else:
+                        return_log_dict[f'test_{key}'] = value
+            else:
+                for key, value in loss_log_dict.items():
+                    if log_scale:
+                        return_log_dict[f'log_val_{key}'] = math.log(value) 
+                    else:
+                        return_log_dict[f'val_{key}'] = value
 
-        # label formatting
-        return_log_dict = {}
-        if training:
-            for key, value in loss_log_dict.items():
-                if log_scale:
-                    return_log_dict[f'log_train_{key}'] = math.log(value) 
-                else:
-                    return_log_dict[f'train_{key}'] = value
-        elif test:
-            for key, value in loss_log_dict.items():
-                if log_scale:
-                    return_log_dict[f'log_test_{key}'] = math.log(value) 
-                else:
-                    return_log_dict[f'test_{key}'] = value
-        else:
-            for key, value in loss_log_dict.items():
-                if log_scale:
-                    return_log_dict[f'log_val_{key}'] = math.log(value) 
-                else:
-                    return_log_dict[f'val_{key}'] = value
+            summary_output = self.profiler.summary()
+            print(summary_output)
+            return loss, return_log_dict  
 
-        return loss, return_log_dict  
 
-    def on_train_epoch_end(self, training_outputs):
-        breakpoint()
-        all_train_features = np.concatenate([output["features"] for output in training_outputs], axis=0)
+    
+    def on_train_epoch_end(self):
+        all_train_features = np.concatenate([output["features"] for output in self.training_svm_outputs], axis=0) #(B*L,N,d)
         all_train_features = all_train_features.reshape(-1, all_train_features.shape[-1]) #(N,d)
         all_train_labels, all_test_labels = [], []
-        for output in training_outputs:
+        for output in self.training_svm_outputs:
             all_train_labels += output["labels"]
+            
+        all_test_features = np.concatenate([output["test_features"] for output in self.test_svm_outputs], axis=0)
+        all_test_features = all_test_features.reshape(-1, all_test_features.shape[-1]) 
+        for output in self.test_svm_outputs:
             all_test_labels += output["test_labels"]
         
-        all_test_features = np.concatenate([output["test_features"] for output in training_outputs], axis=0)
-        all_test_features = all_test_features.reshape(-1, all_test_features.shape[-1]) 
         
         model_tl = SVC(C = 0.01, kernel='linear')
         model_tl.fit(all_train_features, all_train_labels)
@@ -300,44 +306,35 @@ class LitEGNNConsistent(L.LightningModule):
          
 
     def training_step(self, batch, batch_idx, dataloader_idx=0):
-        breakpoint()
+        curr_batch = batch[dataloader_idx]
+
         if dataloader_idx == 0:
-             # batch should be feats, coors, masks (but a small number, since we are going to augment the batch)
-            loss, log_dict = self.shared_step(batch, batch_idx, training=True)
+            # batch should be feats, coors, masks (but a small number, since we are going to augment the batch)
+            loss, log_dict = self.shared_step(curr_batch, batch_idx, training=True)
+            self.profiler.summary()
             self.log_dict(log_dict) 
             return {'loss': loss} 
         elif dataloader_idx == 1:
-            svm_train_dict = self.get_svm_feat_labels(batch)
+            svm_train_dict = self.get_svm_feat_labels(curr_batch)
+            self.training_svm_outputs.append(svm_train_dict)
             return svm_train_dict
         elif dataloader_idx == 2:
-            svm_test_dict = self.get_svm_feat_labels(batch, True)
+            svm_test_dict = self.get_svm_feat_labels(curr_batch, True)
+            self.test_svm_outputs.append(svm_test_dict)
             return svm_test_dict
         else:
             raise ValueError("Should only have train_ds, svm_train, svm_test")
     
     def validation_step(self, batch, batch_idx):
         # batch should be feats, coors, masks (but a small number, since we are going to augment the batch)
-        loss, log_dict = self.shared_step(batch, batch_idx, training=False)
+        loss, log_dict = self.shared_step(batch, batch_idx, training=False, test=False)
         self.log_dict(log_dict) 
         return {'loss': loss} 
-       
     
     def test_step(self, batch, batch_idx, dataloader_idx=0):
-        breakpoint()
-        # TODO: check if test takes in a seperate SVM test set 
-        if dataloader_idx == 0:
-             # batch should be feats, coors, masks (but a small number, since we are going to augment the batch)
-            loss, log_dict = self.shared_step(batch, batch_idx, training=False, test=True)
-            self.log_dict(log_dict) 
-            return {'loss': loss} 
-        elif dataloader_idx == 1:
-            svm_train_dict = get_svm_feat_labels(batch)
-            return svm_train_dict
-        elif dataloader_idx == 2:
-            svm_test_dict = get_svm_feat_labels(batch, True)
-            return svm_test_dict
-        else:
-            raise ValueError("Should only have train_ds, svm_train, svm_test")
+        loss, log_dict = self.shared_step(batch, batch_idx, training=False, test=True)
+        self.log_dict(log_dict) 
+        return {'loss': loss} 
     
     def configure_optimizers(self):
         # Setup LARS optimizer if pair loss
@@ -368,12 +365,9 @@ class LitEGNNConsistent(L.LightningModule):
             }
         }
 
-        
-
-
-
-
-
+    
+#### OLD CODE ######
+#### OLD CODE ######
 class LitEGNNPointNet(L.LightningModule):
     '''
     Torch lightning EGNN encoder with PointNet segmentation network (decoder).
@@ -578,7 +572,7 @@ class LitEGNNPointNet(L.LightningModule):
 
         loss = 0. 
         loss_log_dict = {}
-        breakpoint()
+ 
         if self.training_config.pair_loss:
             feats, feats_prime, coors, coors_prime, mask = batch
             output_dict = self(feats=feats, coors=coors,mask=mask,\

@@ -3,6 +3,7 @@ Pytorch lightning driver code to set up trainer and train
 '''
 from egnn_lightning import LitEGNNConsistent
 from lightning.pytorch import Trainer
+from lightning.pytorch.profilers import SimpleProfiler
 from lightning.pytorch.loggers import MLFlowLogger
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
 from lightning.pytorch.callbacks import ModelCheckpoint 
@@ -34,7 +35,7 @@ def main(cfg: DictConfig):
         raise ValueError("Pair loss should be turned off for these point cloud experiments.")
         #train_ds, val_ds, test_ds = PairedDataset(train_ds), PairedDataset(val_ds), PairedDataset(test_ds)
 
-    model = LitEGNNConsistent(cfg)
+    model = LitEGNNConsistent(cfg, SimpleProfiler(dirpath='/mnt/justin/multi-scale-se3-representations/outputs',filename='logging.txt'))
     mlf_logger = MLFlowLogger(experiment_name="lightning_logs_consistency", tracking_uri="http://127.0.0.1:5000", save_dir="./mlruns")
     mlf_logger.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
 
@@ -58,6 +59,5 @@ def main(cfg: DictConfig):
         trainer.fit(model, datamodule=data_module)
 
 if __name__ == "__main__":
-    #multiprocessing.set_start_method('spawn', force=True)
     print("\n <<Don't forget to change the loss weighting scalars!>>\n")
     main()
