@@ -142,9 +142,10 @@ class PointToGraphDataset(torch.utils.data.Dataset):
 
     contains_label: (bool)If true, then the dataset has as third object tuple (pc, label). If false, dataset has as third object pc 
     '''
-    def __init__(self, ds, contains_label):
+    def __init__(self, ds, contains_label, transform=None):
         self.ds = ds 
         self.contains_label = contains_label
+        self.transform = transform 
         #num_nodes = [len(self.ds[i]) for i in range(0, len(self.ds))]
         #assert len(set(num_nodes)) == 1
     
@@ -162,6 +163,9 @@ class PointToGraphDataset(torch.utils.data.Dataset):
 
         mask = torch.ones(len(coords), dtype=torch.int).bool()
         feats = torch.norm(coords, dim=-1, keepdim=True)
+
+        if self.transform:
+            (feats, coords, mask) = self.transform((feats, coords, mask))
 
         if self.contains_label:
             return feats, coords, mask, label 

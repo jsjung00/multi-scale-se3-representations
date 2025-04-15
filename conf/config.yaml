@@ -4,10 +4,11 @@ defaults:
   - model: egnn.yaml
   - optimizer: adamw.yaml 
   - training_data: shapenet.yaml
-  - svm_data: scan_obj-bg.yaml
+  - svm_data: scan_obj-bg.yaml #ModelNet40.yaml 
 
 accelerator: "gpu"
 devices: 1
+strategy: "auto"
 
 
 hydra:

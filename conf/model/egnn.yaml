@@ -1,7 +1,7 @@
 # encoder 
 encoder_depth: 3
 encoder_init_feat_dim: 32 #256
-encoder_out_feat_dim: 256 #2048
+encoder_out_feat_dim: 1024 #2048
 
 # barlow projector
 projector_sizes: [256, 256] # size of each MLP layer. TODO: make this larger.
@@ -12,4 +12,4 @@ num_nearest_neighbors: 0 #16
 coor_weights_clamp_value: 2.0
 norm_coors: true
 dropout: 0.01
-soft_edges: True #false 
+soft_edges: false #false 

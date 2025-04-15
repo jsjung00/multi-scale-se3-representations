@@ -18,22 +18,96 @@ import line_profiler
 import time 
 import concurrent.futures
 import psutil
-import pykeops
-from pykeops.torch import LazyTensor 
+#import pykeops
+#from pykeops.torch import LazyTensor 
 
-
-def epanechnikov_torch(d, radius):
+def fast_convolution(point_cloud, radii, convolution='gaussian'):
     '''
-    d: (torch.Tensor)
-    radius: (float) bandwidth
-    '''
-    mu = d / radius 
+    Returns a list of kernel smoohted point clouds and the weight matrices based on radii
+    point_cloud: (tensor or nd.array) shape (B,N,3) or (N,3) 
+    radii: List[float] of K many radius
 
-    breakpoint()
+    Return: smoothed point cloud (torch.tensor) (B, K, N, 3) and weights (B, K, N, N)
+
+    '''
+    if not torch.is_tensor(radii):
+        radii = torch.tensor(radii).float().to(point_cloud.device) #(K,)
+
+    if len(point_cloud.shape) == 2:
+        point_cloud = torch.unsqueeze(point_cloud, 0) #(B,N,3)
+
     
-    mask = (mu.abs() <= 1).if_then_else(1.0, 0.0)
+    distance_matrices = torch.cdist(point_cloud, point_cloud) #(B,N,N)
 
-    return (3.0/4.0) * (1 - mu**2) * mask
+    B,N,N = distance_matrices.shape
+    K = len(radii)
+
+    expanded_radii = torch.unsqueeze(radii, 0).expand(B, -1).unsqueeze(-1).unsqueeze(-1) #(B,K,1,1)
+
+    broadcast_radii = torch.broadcast_to(expanded_radii, (B, K, N, N)) # (B,K,N,N)
+
+    distance_matrices_expanded = distance_matrices.unsqueeze(1) #(B,1,N,N) 
+    distance_matrices_broadcasted = torch.broadcast_to(distance_matrices_expanded, (B,K,N,N))
+
+    distance_matrices_radii = distance_matrices_broadcasted/ broadcast_radii #(B,K,N,N)
+
+    weights = torch.exp(-1 * distance_matrices_radii)
+
+    # normalize weights
+    norm = weights.sum(dim=3, keepdim=True)
+    weights /= norm 
+
+    # get smoothed versions of point cloud 
+    smoothed_point_clouds = weights @ torch.unsqueeze(point_cloud, 1) #(B,K,N,3)
+    
+    return smoothed_point_clouds, weights 
+
+def fast_batch_lowres(point_clouds, feature_matrices, radii):
+    '''
+    Given original point_clouds and feature matrices, creates downsampled versions of the point cloud and feature matrix
+        according to various radii in the radius_list
+
+    point_cloud: (tensor or nd.array) shape (B,N,3) 
+    feature_matrix: (tensor or nd.array) shape (B,N,d)
+    radii: List[float] or nd.array(float) of shape (k,)
+
+    Returns: 
+        Tuple of (feats, coors, masks, feature_matrices) where feats is (B*k,N,1) and coors is (B*k,N,3) and mask is (B*k,N) and 
+            feature_matrices is (B*k,N,d)
+
+    #TODO: Create masks based on mask input. Currently assume that we have no masking....
+    '''
+    smoothed_point_clouds, weights = fast_convolution(point_clouds,radii)
+    B,K,N,D = smoothed_point_clouds.shape 
+
+    smoothed_features = weights @ torch.unsqueeze(feature_matrices, 1) #(B,K,N,D)
+
+    # collapse into one batch 
+    smoothed_point_clouds = torch.reshape(smoothed_point_clouds,(B*K, N,D))
+    smoothed_features = torch.reshape(smoothed_features, (B*K, N, -1))
+    batch_feats = torch.norm(smoothed_point_clouds, dim=-1, keepdim=True) #(B*K, N,1)
+    batch_mask = torch.ones(B*K, N).to(point_clouds.device)
+    
+    return batch_feats, smoothed_point_clouds, batch_mask, smoothed_features
+
+
+def gaussian_torch(D, radius):
+    '''
+    Returns weights based on distance matrix and gaussian kernel
+        Note: we normalize the weights, so don't need to worry about normalization constant
+    
+    D: (torch.Tensor) distance matrix 
+    radius: (float)
+    '''
+    breakpoint()
+    weights = (-1*D/radius).exp()
+    normalization = weights.sum(axis=1)
+    normalization = torch.broadcast_to(normalization, (1, *weights.shape)) #(1,N,N) hack to get around 2d bug
+
+    weights = weights / normalization
+    return weight 
+
+
 
 
 def epanechnikov_weight(distances, radius):
@@ -46,23 +120,22 @@ def uniform_weights(distances, radius):
     weights[distances > radius] = 0
     return weights 
 
-def convolve_torch(point_cloud, radius, kernel="epanechnikov"):
+def convolve_torch(point_cloud, radius, kernel="gaussian"):
     '''
     Returns kernel convolved point cloud and also normalized weight matrix used for convolution
 
     point_cloud: (torch.Tensor) (N,3)
     radius: (float)
 
-    #TODO: fix and write efficient implementation
+    #TODO: currently uses gaussian kernel. But can truncate number of neighbors (in practice, not very different since exponential decay)
     '''
     points_i = LazyTensor(point_cloud[:, None, :]) 
     points_j = LazyTensor(point_cloud[None, :, :])
 
     D2 = ((points_i - points_j) ** 2).sum(-1).sqrt()
 
-    weights = epanechnikov_torch(D2, radius)
-    normalization = weights.sum(dim=1, keepdim=True) + 1e-8
-    weights = weights / normalization
+    weights = gaussian_torch(D2, radius)
+    #weights = epanechnikov_torch(D2, radius)
 
     conv_point_cloud = weights @ point_cloud 
 
@@ -317,7 +390,7 @@ def vista_visualize(point_cloud):
     pc = pdata.glyph(scale=False, geom=sphere, orient=False)
     pc.plot(cmap="Reds")
 
-def plotly_visualize(point_cloud, point_cloud2):
+def plotly_visualize(point_cloud, point_cloud2, title='3d Point Cloud'):
     fig = go.Figure()
 
     fig.add_trace(go.Scatter3d(
@@ -338,7 +411,7 @@ def plotly_visualize(point_cloud, point_cloud2):
         name='PC2'
     ))
 
-    fig.update_layout(title='3D Point Cloud',
+    fig.update_layout(title=title,
                   scene=dict(
                       xaxis_title='X',
                       yaxis_title='Y',
@@ -353,13 +426,25 @@ if __name__ == "__main__":
 
     #first_pc = pc_train_dataset[0].cpu().numpy()
     
-    test_point_cloud =  create_fractal_point_cloud(num_layers=3)
+    test_point_cloud =  torch.from_numpy(create_fractal_point_cloud(num_layers=3)).float()
 
-    convolved_one = convolve_torch(torch.from_numpy(test_point_cloud).float(), radius=0.5)
-    convolved_two = convolve_point_cloud(test_point_cloud, radius=0.5)
+    second_point_cloud = test_point_cloud + 0.5*torch.randn(test_point_cloud.shape)
 
-    checking_convolution = torch.is_equal(convolved_one, torch.from_numpy(convolved_two).float())
-    breakpoint()
+
+    test_batch = torch.stack([test_point_cloud, second_point_cloud])
+    
+    # gaussian convolution
+    start_time = time.perf_counter()
+    smooth_point_cloud, weights = fast_convolution(test_point_cloud.unsqueeze(0), radii=[0.1, 1.0])
+    end_time = time.perf_counter()
+    print(f"Time elapses: {end_time-start_time :.4f} sec" )
+    
+    small_window = smooth_point_cloud[0,0].cpu().numpy()
+    big_window = smooth_point_cloud[0,1].cpu().numpy()
+    plotly_visualize(small_window, big_window)
+    
+    '''
+    plotly_visualize(test_point_cloud.cpu().numpy(), smooth_point_cloud.cpu().numpy())
     
     
 
@@ -379,18 +464,11 @@ if __name__ == "__main__":
     breakpoint()
 
     is_equal = np.all(np.equal(convolved_one, convolved_two))
-
+    '''
 
 
 
     #create_lowres_input(torch.from_numpy(test_point_cloud).float(), torch.rand(len(test_point_cloud),100), torch.ones(len(test_point_cloud)), np.random.uniform(size=32))
-
-    #vista_visualize(test_point_cloud)
-
-    # visualize the original point cloud 
-    #plotly_visualize(test_point_cloud)
-
-    # visualize the smoothed point cloud
 
     #smooth_cloud, indices_weights = convolve_point_cloud(test_point_cloud, radius=0.5)
     #plotly_visualize(test_point_cloud, smooth_cloud)

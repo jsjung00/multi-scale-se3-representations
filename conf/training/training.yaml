@@ -5,7 +5,7 @@ log_dir: "log/"
 
 # General parameters
 num_epochs: 1000
-batch_size: 8
+batch_size: 1
 
 
 max_points: 150
@@ -21,19 +21,33 @@ hparams: null
 pair_loss: False
 recon_loss: True 
 consistency_loss: True 
-sparse_loss: False
-sparsity_weight: 0.0
-recon_weight: 0.5
-consistency_weight: 0.5
-barlow_weight: 0.0
-denoise_input: False
+feature_var_loss: True 
 
+sparse_loss: False
+data_augment: True #False  
+
+sparsity_weight: 0.0
+recon_weight: 0.4
+consistency_weight: 0.4
+barlow_weight: 0.0
+feature_var_weight: 0.2
+denoise_input: False
 
 # Barlow
 barlow_lambda: 1e-6
 
 # Consistency augmentation
-num_lowres_augmentations: 32
-min_radius: 0.1
-max_radius: 0.75
-svm_batch_size: 256 # do the max RAM allows since not used for gradients + batches are to be accumulated... 
+num_lowres_augmentations: 16
+min_radius: 0.01
+max_radius: 0.2
+svm_batch_size: 4 # 2048 PC. do the max RAM allows since not used for gradients + batches are to be accumulated...
+
+# Variance regularization
+target_variance: 0.1
+max_reg_loss: 20
+
+# SVM representation
+#max_pool_only: False 
+#mean_pool_only: True
+#sum_max_mean: False
+#concat_max_mean: False 
