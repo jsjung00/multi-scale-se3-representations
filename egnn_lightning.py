@@ -160,6 +160,7 @@ class LitEGNNConsistent(L.LightningModule):
         return_dict = {'z': z, 'x_hat': x_hat, 'encoded_feats': encoded_feats}
         return return_dict
 
+    @torch.no_grad() 
     def get_svm_feat_labels(self, batch, is_test=False):
         '''
         Returns a list of features (representations from our base model) for SVM to train on and a list of target labels
@@ -170,29 +171,36 @@ class LitEGNNConsistent(L.LightningModule):
             {'features': numpy.array (B,N,d), 'labels': List[np.float]} or {'test_features': numpy.array (B,N,d), 'test_labels': List[np.float]}
 
         '''
+        was_training = self.training
         self.eval() 
         feats, coors, mask, label = batch  
         labels = label.detach().cpu().numpy()
-        coors = coors.cuda().contiguous()
-        feats = feats.cuda().contiguous()
-        mask = mask.cuda().contiguous()
+        feats = feats.to(self.device, non_blocking=True)
+        coors = coors.to(self.device, non_blocking=True)
+        mask  = mask.to(self.device,  non_blocking=True)
 
-        with torch.no_grad():
-            return_dict = self(feats, coors, mask=mask) 
-            features = return_dict['encoded_feats']
+        features = self(feats, coors, mask=mask)['encoded_feats'] 
 
         max_rep = features.max(dim=1)[0]
         mean_rep = features.mean(dim=1)
         sum_rep = max_rep + mean_rep      
         cat_rep = torch.cat([max_rep, mean_rep], dim=1)
 
-        return_dict = {'max_rep': max_rep, 'mean_rep':mean_rep, 'sum_rep': sum_rep, 'cat_rep':cat_rep, 'labels':labels}
+        out = {
+            "max_rep":  max_rep.detach().to("cpu").numpy(),
+            "mean_rep": mean_rep.detach().to("cpu").numpy(),
+            "sum_rep":  sum_rep.detach().to("cpu").numpy(),
+            "cat_rep":  cat_rep.detach().to("cpu").numpy(),
+            "labels":   labels,
+        }
+
+        if was_training:
+            self.train()
 
         if is_test:
-            test_return_dict = {'test_' + k: v for k,v in return_dict.items()}
-            return test_return_dict
+            out = {'test_' + k: v for k,v in out.items()}
         
-        return return_dict 
+        return out 
 
     def shared_step(self, batch, batch_idx, training=True, test=False, log_scale=True):
         '''
@@ -268,19 +276,22 @@ class LitEGNNConsistent(L.LightningModule):
         if training:
             for key, value in loss_log_dict.items():
                 if log_scale:
-                    return_log_dict[f'log_train_{key}'] = math.log(value) 
+                    if value >= 0: #don't log if loss is negative, if zero add a slight constant to prevent error
+                        return_log_dict[f'log_train_{key}'] = math.log(value + 1e-20) 
                 else:
                     return_log_dict[f'train_{key}'] = value
         elif test:
             for key, value in loss_log_dict.items():
                 if log_scale:
-                    return_log_dict[f'log_test_{key}'] = math.log(value) 
+                    if value >= 0:
+                        return_log_dict[f'log_test_{key}'] = math.log(value + 1e-20) 
                 else:
                     return_log_dict[f'test_{key}'] = value
         else:
             for key, value in loss_log_dict.items():
                 if log_scale:
-                    return_log_dict[f'log_val_{key}'] = math.log(value) 
+                    if value >= 0: 
+                        return_log_dict[f'log_val_{key}'] = math.log(value + 1e-20) 
                 else:
                     return_log_dict[f'val_{key}'] = value
 
@@ -316,7 +327,7 @@ class LitEGNNConsistent(L.LightningModule):
     def training_step(self, batch, batch_idx, dataloader_idx=None):
         # batch should be feats, coors, masks (but a small number, since we are going to augment the batch)
         loss, log_dict = self.shared_step(batch, batch_idx, training=True)
-        #self.profiler.summary()
+        
         if self.cfg.strategy != "auto":
             self.log_dict(log_dict, sync_dist=True) 
         else:
