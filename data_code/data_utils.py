@@ -72,7 +72,7 @@ class PointCloudScaleAndTranslate(object):
             xyz1 = np.random.uniform(low=self.scale_low, high=self.scale_high, size=[3])
             xyz2 = np.random.uniform(low=-self.translate_range, high=self.translate_range, size=[3])
             
-            pc_transformed[i, :, 0:3] = torch.mul(pc_transformedc[i, :, 0:3], torch.from_numpy(xyz1).float().cuda()) + torch.from_numpy(xyz2).float().cuda()
+            pc_transformed[i, :, 0:3] = torch.mul(pc_transformed[i, :, 0:3], torch.from_numpy(xyz1).float().cuda()) + torch.from_numpy(xyz2).float().cuda()
             
         return pc_transformed
 

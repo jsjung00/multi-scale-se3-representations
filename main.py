@@ -11,7 +11,7 @@ from data_code.data_utils import get_pointcloud_datasets, PointCloudScaleAndTran
 from data_code.data_lightning import PointCloudDataModule
 from model_lightning import SVMScoreCallback
 from utils_lightning import SimulatedErrorCallback
-
+import torch 
 from datetime import timedelta
 from torch.utils.data import DataLoader
 import torch.distributed as dist 
@@ -33,6 +33,7 @@ os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "0"
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig):
+
     wandb.login(key=os.getenv('WANDB_API_KEY'), relogin=True)
 
     # reduce timeout
@@ -52,8 +53,10 @@ def main(cfg: DictConfig):
         #train_ds, val_ds, test_ds = PairedDataset(train_ds), PairedDataset(val_ds), PairedDataset(test_ds)
 
     model = LitEGNNConsistent(cfg)
+    #model = torch.compile(model)  #torch compile has slight speedup
+    
     # Use wandb logger
-    logger = WandbLogger(name=cfg.training.experiment_name, save_dir="./mlruns",project="lightning_logs_consistency" )
+    logger = WandbLogger(name=cfg.training.experiment_name, save_dir="./mlruns",project="consistency_profiling")
     logger.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
 
     #TODO: change min delta based on experiment!
@@ -67,11 +70,14 @@ def main(cfg: DictConfig):
     svm_train_dl, svm_test_dl = DataLoader(svm_train_ds, batch_size=cfg.training.svm_batch_size, num_workers=2, drop_last=True), DataLoader(svm_test_ds, batch_size=cfg.training.svm_batch_size, num_workers=2, drop_last=True)
     SVM_callback =  SVMScoreCallback(svm_train_dl, svm_test_dl, every_n_epoch=1)
 
-    callbacks = [checkpoint_callback, SVM_callback, EarlyStopping(monitor="log_val_loss", mode="min", patience=50, min_delta=0.01, check_on_train_epoch_end=False)]
+    callbacks = [checkpoint_callback, SVM_callback]
+    if cfg.training.early_stopping:
+        callbacks.append(EarlyStopping(monitor="log_val_loss", mode="min", patience=5000, min_delta=0.01, check_on_train_epoch_end=False))
 
     trainer = Trainer(accelerator=cfg.accelerator, devices=cfg.devices, strategy=cfg.strategy, logger=logger,\
         callbacks=callbacks,\
-            max_epochs=cfg.training.num_epochs, val_check_interval=1.0, gradient_clip_val=5.0, enable_progress_bar=cfg.training.enable_tqdm)
+            max_epochs=cfg.training.num_epochs, val_check_interval=1.0, gradient_clip_val=5.0, enable_progress_bar=cfg.training.enable_tqdm,\
+            profiler="simple", precision='bf16-mixed')
     
     if cfg.training.test:
         assert cfg.training.model_checkpoint is not None, "Need to specify which checkpoint to test"

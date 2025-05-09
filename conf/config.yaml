@@ -4,19 +4,24 @@ defaults:
   - model: egnn.yaml
   - optimizer: adamw.yaml 
   - training_data: shapenet.yaml
-  - svm_data: scan_obj-bg.yaml #ModelNet40.yaml 
+  - svm_data: scan_PB.yaml #scan_obj.yaml # #ModelNet40.yaml 
 
 accelerator: "gpu"
 devices: 1
-strategy: "auto"
+strategy: "auto" #"ddp_find_unused_parameters_true" #"auto"
 
 
 hydra:
   sweeper:
     params:
-      training.batch_size: 256,512
-      training.barlow_lambda: 1e-6,1e-5,1e-3,1e-2
-      optimizer.learning_rate: 5e-6,5e-4
-      model.encoder_depth: 1,2,3
-      model.encoder_init_feat_dim: 32,128,256
-      model.encoder_out_feat_dim: 256,1024
+      training.consistency_weight: 2e-1,8e-1,5e-2
+      #training.feature_var_weight: 5e-2,4e-1
+      #training.target_variance: 1e-2,1e-3,1e-5
+
+
+      #training.batch_size: 256,512
+      #training.barlow_lambda: 1e-6,1e-5,1e-3,1e-2
+      #optimizer.learning_rate: 5e-6,5e-4
+      #model.encoder_depth: 1,2,3
+      #model.encoder_init_feat_dim: 32,128,256
+      #model.encoder_out_feat_dim: 256,1024

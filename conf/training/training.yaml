@@ -1,19 +1,24 @@
 # Data and logging
-model_weights: "results/best_model_delta_t_0.01.pth"
 training_dir: "/mnt/jonathan/DataFlowMatching/small_training_data" #"/mnt/justin/training_data/" # #  "/mnt/justin/small_data/"  
 log_dir: "log/"
+experiment_name: "some_experiment"
+checkpoint_dir: "/mnt/justin/multi-scale-se3-representations/checkpoints/test_folder"
+
+enable_tqdm: True #False #  
+early_stopping: False #True
+
 
 # General parameters
-num_epochs: 1000
-batch_size: 1
+num_epochs: 1000 
+batch_size: 6
 
 
 max_points: 150
 time_step: 5e-2
 load_model: False
 
-cont: False 
-model_checkpoint: null 
+cont: False #False 
+model_checkpoint: #null 
 test: False 
 hparams: null 
 
@@ -21,30 +26,31 @@ hparams: null
 pair_loss: False
 recon_loss: True 
 consistency_loss: True 
-feature_var_loss: True 
+feature_var_loss: False
 
 sparse_loss: False
 data_augment: True #False  
 
 sparsity_weight: 0.0
-recon_weight: 0.4
-consistency_weight: 0.4
+recon_weight: 0.5
+consistency_weight: 0.5
 barlow_weight: 0.0
-feature_var_weight: 0.2
+feature_var_weight: 0.
 denoise_input: False
 
 # Barlow
 barlow_lambda: 1e-6
 
 # Consistency augmentation
-num_lowres_augmentations: 16
-min_radius: 0.01
-max_radius: 0.2
-svm_batch_size: 4 # 2048 PC. do the max RAM allows since not used for gradients + batches are to be accumulated...
+num_lowres_augmentations: 6
+min_radius: 0.002
+max_radius: 0.05
+svm_batch_size: 8 # 2048 PC. do the max RAM allows since not used for gradients + batches are to be accumulated...
+consistency_all_pairs: False  
 
 # Variance regularization
 target_variance: 0.1
-max_reg_loss: 20
+max_reg_loss: 10
 
 # SVM representation
 #max_pool_only: False 

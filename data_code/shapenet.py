@@ -10,6 +10,8 @@ class ShapeNet(data.Dataset):
         self.pc_path = config.PC_PATH
         self.subset = subset
         self.npoints = config.N_POINTS
+        self.sampling = config.SAMPLING 
+        self.gauss_sigma = config.GAUSS_SIGMA 
         
         self.data_list_file = os.path.join(self.data_root, f'{self.subset}.txt')
         test_data_list_file = os.path.join(self.data_root, 'test.txt')
@@ -52,6 +54,35 @@ class ShapeNet(data.Dataset):
         np.random.shuffle(self.permutation)
         pc = pc[self.permutation[:num]]
         return pc
+
+    def farthest_point_sampling(self, points, seed=None):
+        '''
+        Return a subsampled version using FPS
+        '''
+        N,dim = points.shape 
+        k = self.sample_points_num
+        assert k <= N, "sampling k must be smaller than number of points"
+
+        if seed is not None:
+            np.random.seed(seed)
+        
+        # array of selected indices
+        sampled_idxs = np.zeros(k, dtype=int)
+        sampled_idxs[0] = np.random.randint(N)
+
+        # keep track of min distance to the set of selected points
+        min_dists = np.full(N, np.inf)
+        for i in range(1,k):
+            # get distance from all points to last added point
+            last_pt = points[sampled_idxs[i-1]]
+            diff = points - last_pt 
+            d2 = np.linalg.norm(diff, axis=1)
+
+            min_dists = np.minimum(min_dists, d2) #update the minimum dist to any selected point 
+
+            sampled_idxs[i] = np.argmax(min_dists)
+        
+        return points[sampled_idxs]
         
     def __getitem__(self, idx):
         # Returns de-meaned and de-normed point cloud
@@ -59,8 +90,18 @@ class ShapeNet(data.Dataset):
 
         data = IO.get(os.path.join(self.pc_path, sample['file_path'])).astype(np.float32)
 
-        data = self.random_sample(data, self.sample_points_num)
+        if self.sampling == "FPS":
+            data = self.farthest_point_sampling(data, self.sample_points_num)
+        else:
+            data = self.random_sample(data, self.sample_points_num)
+        
+
         data = self.pc_norm(data)
+        if self.gauss_sigma > 0:
+            # add noise and then re-normalize 
+            data = data + self.gauss_sigma * np.random.randn(*data.shape) 
+            data = self.pc_norm(data)
+
         data = torch.from_numpy(data).float()
         return sample['taxonomy_id'], sample['model_id'], data
 

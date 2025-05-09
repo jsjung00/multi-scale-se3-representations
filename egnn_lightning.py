@@ -25,7 +25,6 @@ import time
 SiLU = nn.SiLU if hasattr(nn, "SiLU") else Swish_
 
 
-
 class LitEGNNConsistent(L.LightningModule):
     '''
     Applies reconstruction and consistency loss. May need to refactor to apply to other, non EGNN models.
@@ -211,7 +210,7 @@ class LitEGNNConsistent(L.LightningModule):
         if not training or test: 
             self.eval()
 
-        loss, tot_consistency_loss, tot_reconstruction_loss = 0., 0., 0. 
+        loss, tot_consistency_loss, tot_reconstruction_loss, first_res_recon_loss = 0., 0., 0., 0. 
         loss_log_dict = {}
     
         feats, coors, masks = batch
@@ -220,7 +219,7 @@ class LitEGNNConsistent(L.LightningModule):
         output_dict_orig = self(feats=feats, coors=coors, mask=masks)
         init_feature_matrices = output_dict_orig['encoded_feats'] #(B, N,d)
 
-        # ensure that our z_1 does not collapse across different points 
+        # deprecated: feature variance loss for z_1
         if self.training_config.feature_var_loss:
             var = torch.var(init_feature_matrices, dim=1)
             avg_var = torch.mean(var) #average across the point clouds and the feature dimensions
@@ -239,11 +238,14 @@ class LitEGNNConsistent(L.LightningModule):
             orig_x_hat = output_dict_orig['x_hat']
             orig_recon_loss = huber_reconstruction_loss(coors, orig_x_hat)
             tot_reconstruction_loss += orig_recon_loss
+            first_res_recon_loss += orig_recon_loss
         
         if self.training_config.data_augment:
             # calculate low resolution versions based on various radius
-            radii = np.random.uniform(low=self.training_config.min_radius, high=self.training_config.max_radius,\
-            size=self.training_config.num_lowres_augmentations)
+            n = self.training_config.num_lowres_augmentations
+            low, high = self.training_config.min_radius, self.training_config.max_radius
+
+            radii = ((high-low) * torch.rand(n, device=feats.device)) + low 
 
             batch_feats, batch_point_clouds, batch_mask, batch_features = fast_batch_lowres(coors, init_feature_matrices, radii) 
 
@@ -268,6 +270,7 @@ class LitEGNNConsistent(L.LightningModule):
         if self.training_config.recon_loss:
             loss += (self.training_config.recon_weight * tot_reconstruction_loss)
             loss_log_dict['recon_loss'] = tot_reconstruction_loss
+            loss_log_dict['first_res_recon_loss'] = first_res_recon_loss
 
         loss_log_dict['loss'] = loss
 
@@ -366,7 +369,7 @@ class LitEGNNConsistent(L.LightningModule):
                 weight_decay_filter=True, lars_adaptation_filter=True)
         elif self.optimizer_config.name == "adamw":
             optim = torch.optim.AdamW(self.parameters(), lr=self.optimizer_config.learning_rate,\
-            weight_decay=self.optimizer_config.weight_decay)
+            weight_decay=self.optimizer_config.weight_decay, fused=False)
         else:
             raise ValueError("Optimizer either lars or adamW")
             
