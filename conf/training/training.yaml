@@ -9,7 +9,7 @@ early_stopping: False #True
 
 
 # General parameters
-num_epochs: 1000 
+num_epochs: 10000 
 batch_size: 6
 
 
@@ -46,7 +46,7 @@ num_lowres_augmentations: 6
 min_radius: 0.002
 max_radius: 0.05
 svm_batch_size: 8 # 2048 PC. do the max RAM allows since not used for gradients + batches are to be accumulated...
-consistency_all_pairs: False  
+all_res_start: False # If true, randomly pick some x_t to be the highest resolution and create lower res versions from that. 
 
 # Variance regularization
 target_variance: 0.1

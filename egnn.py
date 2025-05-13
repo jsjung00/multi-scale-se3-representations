@@ -121,8 +121,8 @@ class EGNN(nn.Module):
         coors_out (batch, num_points, 3) final coordinate vectors of points 
         '''
         assert edges is None and mask is not None and adj_mat is None  #assume mask since have null padding 
-      
 
+    
         b, n, d, device, fourier_features, num_nearest, valid_radius, only_sparse_neighbors = * \
             feats.shape, feats.device, self.fourier_features, self.num_nearest_neighbors, self.valid_radius, self.only_sparse_neighbors
 

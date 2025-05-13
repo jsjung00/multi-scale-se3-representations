@@ -8,7 +8,7 @@ projector_sizes: [256, 256] # size of each MLP layer. TODO: make this larger.
 
 # general settings
 init_feat_dim: 1
-num_nearest_neighbors: 0 #16
+num_nearest_neighbors: 0 #64 #16
 coor_weights_clamp_value: 2.0
 norm_coors: true
 dropout: 0.01

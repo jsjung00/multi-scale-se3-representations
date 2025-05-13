@@ -86,7 +86,7 @@ def fast_batch_lowres(point_clouds, feature_matrices, radii):
     smoothed_point_clouds = torch.reshape(smoothed_point_clouds,(B*K, N,D))
     smoothed_features = torch.reshape(smoothed_features, (B*K, N, -1))
     batch_feats = torch.norm(smoothed_point_clouds, dim=-1, keepdim=True) #(B*K, N,1)
-    batch_mask = torch.ones(B*K, N).to(point_clouds.device)
+    batch_mask = torch.ones(B*K, N).to(point_clouds.device).bool()
     
     return batch_feats, smoothed_point_clouds, batch_mask, smoothed_features
 

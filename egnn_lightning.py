@@ -214,6 +214,7 @@ class LitEGNNConsistent(L.LightningModule):
         loss_log_dict = {}
     
         feats, coors, masks = batch
+        B = feats.shape[0]
 
         # first calculate z_1
         output_dict_orig = self(feats=feats, coors=coors, mask=masks)
@@ -243,12 +244,35 @@ class LitEGNNConsistent(L.LightningModule):
         if self.training_config.data_augment:
             # calculate low resolution versions based on various radius
             n = self.training_config.num_lowres_augmentations
-            low, high = self.training_config.min_radius, self.training_config.max_radius
+            
+            if self.training_config.all_res_start:
+                # choose a random lower resolution delta to make (1-delta) starting resolution
+                max_delta, min_delta = self.training_config.max_radius - 0.01, 0 
 
+                init_res_delta = ((max_delta - min_delta) * torch.rand(n, device=feats.device)) + min_delta 
+
+                # get starting lower resolution that we will use as "highest" resolution target
+                feats, coors, mask, features = fast_batch_lowres(coors, init_feature_matrices, init_res_delta) 
+
+                # sub-sample to B many 
+                subset_idxs = torch.randperm(B) 
+                feats, coors, mask, features = feats[subset_idxs], coors[subset_idxs], mask[subset_idxs], features[subset_idxs]
+
+                # calculate z_start 
+                output_dict_start = self(feats=feats, coors=coors, mask=mask)
+                init_feature_matrices = output_dict_start['encoded_feats'] #(B, N,d) 
+
+                # change smoothing level so lower resolution versions are in [min_radius, max_radius] amount of smoothing
+                delta_min = self.training_config.min_radius - init_res_delta
+                low = torch.clamp(delta_min, min=0.0)
+                high =  torch.ones_like(init_res_delta) * (self.training_config.max_radius - init_res_delta)
+            else:
+                low, high = self.training_config.min_radius, self.training_config.max_radius
+
+            # calculate smoothing radius to generate lower resolution versions of start
             radii = ((high-low) * torch.rand(n, device=feats.device)) + low 
 
             batch_feats, batch_point_clouds, batch_mask, batch_features = fast_batch_lowres(coors, init_feature_matrices, radii) 
-
             output_dict = self(feats=batch_feats, coors=batch_point_clouds, mask=batch_mask)
 
             # consistency loss 

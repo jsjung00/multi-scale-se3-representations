@@ -20,6 +20,7 @@ class ScanObjectNN(Dataset):
         self.permutation = np.arange(self.npoints)
         self.sampling = config.SAMPLING
         self.gauss_sigma = config.GAUSS_SIGMA 
+        self.norm = config.NORM
         
         if self.subset == 'train':
             h5 = h5py.File(os.path.join(self.root, 'training' + SPLIT_MAP[self.split]), 'r')
@@ -34,6 +35,9 @@ class ScanObjectNN(Dataset):
         else:
             raise NotImplementedError()
 
+        self.torch_gen = torch.Generator().manual_seed(42)
+        self.np_rng   = np.random.default_rng(42)
+
         print(f'Successfully load ScanObjectNN shape of {self.points.shape}')
 
     def pc_norm(self, pc):
@@ -45,9 +49,7 @@ class ScanObjectNN(Dataset):
         return pc
     
     def random_sample(self, pc, num):
-        torch.manual_seed(42)
-
-        np.random.shuffle(self.permutation)
+        self.np_rng.shuffle(self.permutation)
         pc = pc[self.permutation[:num]]
         return pc
     
@@ -58,13 +60,10 @@ class ScanObjectNN(Dataset):
         N,dim = points.shape 
         k = self.sample_points_num
         assert k <= N, "sampling k must be smaller than number of points"
-
-        if seed is not None:
-            np.random.seed(seed)
         
         # array of selected indices
         sampled_idxs = np.zeros(k, dtype=int)
-        sampled_idxs[0] = np.random.randint(N)
+        sampled_idxs[0] = self.np_rng.integers(low=0, high=N, size=None)
 
         # keep track of min distance to the set of selected points
         min_dists = np.full(N, np.inf)
@@ -92,14 +91,16 @@ class ScanObjectNN(Dataset):
             current_points = self.farthest_point_sampling(current_points, self.sample_points_num)
         else:
             current_points = self.random_sample(current_points, self.sample_points_num)
-
-        current_points = self.pc_norm(current_points)
+        
+        if self.norm:
+            current_points = self.pc_norm(current_points)
 
         if self.gauss_sigma > 0:
             # add noise and then re-normalize 
             current_points = current_points + self.gauss_sigma * np.random.randn(*current_points.shape) 
-            current_points = self.pc_norm(current_points)
-
+            if self.norm:
+                current_points = self.pc_norm(current_points)
+        
 
         current_points = torch.from_numpy(current_points).float()
         label = self.labels[idx]

@@ -56,7 +56,7 @@ def main(cfg: DictConfig):
     #model = torch.compile(model)  #torch compile has slight speedup
     
     # Use wandb logger
-    logger = WandbLogger(name=cfg.training.experiment_name, save_dir="./mlruns",project="consistency_profiling")
+    logger = WandbLogger(name=cfg.training.experiment_name, save_dir="./mlruns",project="lightning_logs_consistency")
     logger.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
 
     #TODO: change min delta based on experiment!
@@ -68,7 +68,7 @@ def main(cfg: DictConfig):
     svm_train_ds, svm_test_ds = get_pointcloud_datasets(cfg.svm_data, val_ratio=None)
     svm_train_ds, svm_test_ds = PointToGraphDataset(svm_train_ds, True), PointToGraphDataset(svm_test_ds, True) 
     svm_train_dl, svm_test_dl = DataLoader(svm_train_ds, batch_size=cfg.training.svm_batch_size, num_workers=2, drop_last=True), DataLoader(svm_test_ds, batch_size=cfg.training.svm_batch_size, num_workers=2, drop_last=True)
-    SVM_callback =  SVMScoreCallback(svm_train_dl, svm_test_dl, every_n_epoch=1)
+    SVM_callback =  SVMScoreCallback(svm_train_dl, svm_test_dl, every_n_epoch=10)
 
     callbacks = [checkpoint_callback, SVM_callback]
     if cfg.training.early_stopping:
