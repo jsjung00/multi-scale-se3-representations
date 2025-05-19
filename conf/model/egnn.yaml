@@ -13,3 +13,7 @@ coor_weights_clamp_value: 2.0
 norm_coors: true
 dropout: 0.01
 soft_edges: false #false 
+
+use_projector: True 
+smooth_projected: False 
+

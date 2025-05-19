@@ -8,6 +8,7 @@ from torch.profiler import profile, record_function, ProfilerActivity
 from torch import nn, einsum, broadcast_tensors
 import torch.nn.functional as F
 import numpy as np 
+import psutil, os
 
 
 from einops import rearrange, repeat
@@ -23,6 +24,19 @@ from data_code.smooth_utils import fast_batch_lowres
 import time 
 
 SiLU = nn.SiLU if hasattr(nn, "SiLU") else Swish_
+
+class SimCLRProjectionHead(nn.Module):
+    def __init__(self, dim, out_dim=128):
+        super().__init__()
+
+        self.layer1 = nn.Linear(dim, dim)
+        self.layer2 = nn.Linear(dim, out_dim)
+    
+    def forward(self, z):
+        h1 = self.layer1(z)
+        h2 = F.relu(h1)
+        h = self.layer2(h2)
+        return h 
 
 
 class LitEGNNConsistent(L.LightningModule):
@@ -83,7 +97,9 @@ class LitEGNNConsistent(L.LightningModule):
         self.decoder_input_dim = self.encoder_out_feat_dim * 2
         if self.recon_loss:
             self.decoder = PointNetDecoder(self.decoder_input_dim)    
-
+        
+        # add SimCLR MLP projector 
+        self.projector = SimCLRProjectionHead(self.encoder_out_feat_dim, 128)
         self.save_hyperparameters()
 
     def encode(self, feats, coors, adj_mat=None, edges=None, mask=None):
@@ -207,6 +223,10 @@ class LitEGNNConsistent(L.LightningModule):
 
         batch: tuple of (feats, coors, masks)
         '''
+        if batch_idx % 10 == 0:
+            proc = psutil.Process(os.getpid())
+            print(f"Host RSS: {proc.memory_info().rss/1e9:.1f} GB")
+            
         if not training or test: 
             self.eval()
 
@@ -246,40 +266,65 @@ class LitEGNNConsistent(L.LightningModule):
             n = self.training_config.num_lowres_augmentations
             
             if self.training_config.all_res_start:
-                # choose a random lower resolution delta to make (1-delta) starting resolution
-                max_delta, min_delta = self.training_config.max_radius - 0.01, 0 
+                raise ValueError("This is not working yet.")
+                with torch.no_grad():
+                    # choose a random lower resolution delta to make (1-delta) starting resolution
+                    max_delta, min_delta = self.training_config.max_radius - 0.01, 0 
 
-                init_res_delta = ((max_delta - min_delta) * torch.rand(n, device=feats.device)) + min_delta 
+                    init_res_delta = ((max_delta - min_delta) * torch.rand(n, device=feats.device)) + min_delta 
 
-                # get starting lower resolution that we will use as "highest" resolution target
-                feats, coors, mask, features = fast_batch_lowres(coors, init_feature_matrices, init_res_delta) 
+                    # get starting lower resolution that we will use as "highest" resolution target
+                    feats, coors, mask, features = fast_batch_lowres(coors, init_feature_matrices, init_res_delta) 
 
-                # sub-sample to B many 
-                subset_idxs = torch.randperm(B) 
-                feats, coors, mask, features = feats[subset_idxs], coors[subset_idxs], mask[subset_idxs], features[subset_idxs]
+                    # sub-sample to B many 
+                    subset_idxs = torch.randperm(B) 
+                    feats, coors, mask, features = feats[subset_idxs], coors[subset_idxs], mask[subset_idxs], features[subset_idxs]
 
-                # calculate z_start 
-                output_dict_start = self(feats=feats, coors=coors, mask=mask)
-                init_feature_matrices = output_dict_start['encoded_feats'] #(B, N,d) 
+                    # calculate z_start 
+                    output_dict_start = self(feats=feats, coors=coors, mask=mask)
+                    init_feature_matrices = output_dict_start['encoded_feats'] #(B, N,d) 
+                    del output_dict_start
 
-                # change smoothing level so lower resolution versions are in [min_radius, max_radius] amount of smoothing
-                delta_min = self.training_config.min_radius - init_res_delta
-                low = torch.clamp(delta_min, min=0.0)
-                high =  torch.ones_like(init_res_delta) * (self.training_config.max_radius - init_res_delta)
+
+                    # change smoothing level so lower resolution versions are in [min_radius, max_radius] amount of smoothing
+                    delta_min = self.training_config.min_radius - init_res_delta
+                    low = torch.clamp(delta_min, min=0.0)
+                    high =  torch.ones_like(init_res_delta) * (self.training_config.max_radius - init_res_delta)
+
+                    ## TODO: add explicity memory clearing 
             else:
                 low, high = self.training_config.min_radius, self.training_config.max_radius
 
             # calculate smoothing radius to generate lower resolution versions of start
-            radii = ((high-low) * torch.rand(n, device=feats.device)) + low 
+            radii = ((high-low) * torch.rand(n, device=feats.device)) + low
 
-            batch_feats, batch_point_clouds, batch_mask, batch_features = fast_batch_lowres(coors, init_feature_matrices, radii) 
+            if self.model_config.smooth_projected and self.model_config.use_projector:
+                # calculate projection and then apply smoothing to projected initial features 
+                proj_feature_matrices = self.projector(init_feature_matrices) 
+                batch_feats, batch_point_clouds, batch_mask, batch_features = fast_batch_lowres(coors, proj_feature_matrices, radii) 
+                batch_feats, batch_point_clouds, batch_mask = batch_feats.detach(), batch_point_clouds.detach(), batch_mask.detach()
+            else:
+                batch_feats, batch_point_clouds, batch_mask, batch_features = fast_batch_lowres(coors, init_feature_matrices, radii) 
+                batch_feats, batch_point_clouds, batch_mask = batch_feats.detach(), batch_point_clouds.detach(), batch_mask.detach()
+                
             output_dict = self(feats=batch_feats, coors=batch_point_clouds, mask=batch_mask)
-
+            
             # consistency loss 
             if self.training_config.consistency_loss:
-                z_t_hats = output_dict['encoded_feats']
                 mse_loss = torch.nn.MSELoss()
-                consistency_loss = mse_loss(z_t_hats, batch_features)
+                z_t_hats = output_dict['encoded_feats']
+                if self.model_config.smooth_projected and self.model_config.use_projector:
+                    # calculate projection on encoded of smoothed x_t and compare to smoothed version of projected embedding 
+                    h_t_hats = self.projector(z_t_hats)
+                    consistency_loss = mse_loss(h_t_hats, h_smoothed_z)
+                if self.model_config.use_projector and not self.model_config.smooth_projected:
+                    # calculate 
+                    h_t_hats = self.projector(z_t_hats)
+                    h_smoothed_z = self.projector(batch_features)
+                    consistency_loss = mse_loss(h_t_hats, h_smoothed_z)
+                else:
+                    consistency_loss = mse_loss(z_t_hats, batch_features)
+
                 tot_consistency_loss += consistency_loss
                 loss += (self.training_config.consistency_weight * consistency_loss)
                 loss_log_dict['consistency_loss'] = tot_consistency_loss
